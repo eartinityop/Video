@@ -2,32 +2,59 @@ import os
 import sys
 import asyncio
 import logging
-import json
 import aiohttp
+import json
 from pathlib import Path
 from datetime import datetime
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from aiohttp import web
-import requests
 
-# Setup logging
+# ============================================
+# CONFIGURATION & SETUP
+# ============================================
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
-API_ID = int(os.getenv('API_ID', '123456'))
-API_HASH = os.getenv('API_HASH', 'your_api_hash_here')
-SESSION_STRING = os.getenv('SESSION_STRING', '')
-GH_TOKEN = os.getenv('GH_TOKEN', '')           # GitHub Personal Access Token
-GH_REPO = os.getenv('GH_REPO', '')             # username/repo
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')         # Your bot token for file URLs
+# Load environment variables
+API_ID = os.getenv('API_ID')
+API_HASH = os.getenv('API_HASH')
+SESSION_STRING = os.getenv('SESSION_STRING')
+GH_TOKEN = os.getenv('GH_TOKEN')           # GitHub Personal Access Token
+GH_REPO = os.getenv('GH_REPO')             # username/repo
+BOT_TOKEN = os.getenv('BOT_TOKEN')         # Telegram Bot Token for file URLs
 PORT = int(os.getenv('PORT', 10000))
 
-# Speed options
+# Validate critical environment variables
+MISSING_VARS = []
+if not API_ID: MISSING_VARS.append('API_ID')
+if not API_HASH: MISSING_VARS.append('API_HASH')
+if not SESSION_STRING: MISSING_VARS.append('SESSION_STRING')
+if not BOT_TOKEN: MISSING_VARS.append('BOT_TOKEN')
+
+if MISSING_VARS:
+    logger.error(f"❌ Missing required environment variables: {', '.join(MISSING_VARS)}")
+    logger.error("Please set these in Render dashboard → Environment")
+    sys.exit(1)
+
+if not GH_TOKEN or not GH_REPO:
+    logger.warning("⚠️  GitHub Actions not fully configured (GH_TOKEN or GH_REPO missing)")
+    logger.warning("Bot will work but cannot trigger GitHub Actions")
+
+# ============================================
+# CONSTANTS & GLOBALS
+# ============================================
+
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB (GitHub Actions limit)
+
+# Speed options with inline buttons
 SPEED_OPTIONS = [
     [Button.inline("0.5x", b"speed_0.5"), Button.inline("0.75x", b"speed_0.75")],
     [Button.inline("1.25x", b"speed_1.25"), Button.inline("1.5x", b"speed_1.5")],
@@ -35,8 +62,12 @@ SPEED_OPTIONS = [
     [Button.inline("❌ Cancel", b"cancel")]
 ]
 
-# Store user sessions
+# Store user sessions: user_id -> session_data
 user_sessions = {}
+
+# ============================================
+# GITHUB ACTIONS CLIENT
+# ============================================
 
 class GitHubActionsClient:
     def __init__(self, token, repo):
@@ -45,144 +76,265 @@ class GitHubActionsClient:
         self.base_url = f"https://api.github.com/repos/{repo}"
         self.headers = {
             'Authorization': f'token {token}',
-            'Accept': 'application/vnd.github.v3+json'
+            'Accept': 'application/vnd.github.v3+json',
+            'User-Agent': 'Telegram-Video-Bot/1.0'
         }
+    
+    async def get_direct_video_url(self, file_id):
+        """Get direct download URL for Telegram file with detailed error handling."""
+        try:
+            # Step 1: Get file info from Telegram
+            file_info_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile"
+            params = {'file_id': file_id}
+            
+            logger.info(f"🔍 Getting file info for file_id: {file_id[:20]}...")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file_info_url, params=params) as response:
+                    response_text = await response.text()
+                    logger.debug(f"Telegram API Response: {response.status} - {response_text}")
+                    
+                    if response.status != 200:
+                        logger.error(f"❌ Telegram API HTTP Error: {response.status}")
+                        return None
+                    
+                    data = json.loads(response_text)
+                    
+                    if not data.get('ok'):
+                        error_desc = data.get('description', 'Unknown error')
+                        logger.error(f"❌ Telegram API Error: {error_desc}")
+                        
+                        # Provide user-friendly error messages
+                        if "file is too big" in error_desc:
+                            logger.error("File exceeds Telegram's bot API limit (20MB for bots)")
+                            return "FILE_TOO_BIG"
+                        elif "invalid file id" in error_desc:
+                            logger.error("File ID is invalid or expired")
+                            return "INVALID_FILE_ID"
+                        elif "wrong file id" in error_desc:
+                            logger.error("Wrong file ID format")
+                            return "WRONG_FILE_ID"
+                        
+                        return None
+                    
+                    # Success! Extract file path
+                    file_path = data['result']['file_path']
+                    direct_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                    
+                    logger.info(f"✅ Got direct URL: {direct_url[:80]}...")
+                    return direct_url
+                    
+        except aiohttp.ClientError as e:
+            logger.error(f"❌ Network error getting file URL: {str(e)}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Invalid JSON response from Telegram: {str(e)}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Unexpected error in get_direct_video_url: {str(e)}")
+            return None
     
     async def trigger_video_workflow(self, video_url, speed, chat_id, message_id):
         """Trigger GitHub Actions workflow."""
         try:
+            if not self.token or not self.repo:
+                logger.error("Cannot trigger workflow: GitHub credentials missing")
+                return False
+            
             url = f"{self.base_url}/dispatches"
             
             payload = {
                 'event_type': 'process_video',
                 'client_payload': {
                     'video_url': video_url,
-                    'speed': speed,
-                    'chat_id': chat_id,
-                    'message_id': message_id,
+                    'speed': str(speed),
+                    'chat_id': str(chat_id),
+                    'message_id': str(message_id),
                     'timestamp': datetime.now().isoformat()
                 }
             }
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, 
-                    json=payload,
-                    headers=self.headers
-                ) as response:
+            logger.info(f"🚀 Triggering GitHub Actions for chat {chat_id}, speed {speed}x")
+            logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
+            
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+                async with session.post(url, json=payload) as response:
+                    response_text = await response.text()
+                    
                     if response.status == 204:
-                        logger.info(f"GitHub Actions triggered for chat {chat_id}")
+                        logger.info("✅ Successfully triggered GitHub Actions")
                         return True
                     else:
-                        error_text = await response.text()
-                        logger.error(f"GitHub API error: {response.status} - {error_text}")
+                        logger.error(f"❌ GitHub API error: {response.status} - {response_text}")
+                        
+                        # Parse error for better messages
+                        try:
+                            error_data = json.loads(response_text)
+                            if 'message' in error_data:
+                                logger.error(f"GitHub says: {error_data['message']}")
+                        except:
+                            pass
+                        
                         return False
                         
         except Exception as e:
-            logger.error(f"Trigger workflow error: {e}")
+            logger.error(f"❌ Error triggering workflow: {str(e)}")
             return False
-    
-    def get_direct_video_url(self, file_id):
-    """Get direct download URL for Telegram file."""
-    # First get file path
-    file_info_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-    print(f"[DEBUG] Calling Telegram API: {file_info_url}")  # Logs the URL being called
-    
-    response = requests.get(file_info_url)
-    print(f"[DEBUG] API Response Status: {response.status_code}")  # Logs the HTTP status
-    print(f"[DEBUG] API Response Body: {response.text}")           # Logs the full response
-    
-    if response.status_code == 200:
-        data = response.json()
-        if data.get('ok'):
-            file_path = data['result']['file_path']
-            final_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-            print(f"[DEBUG] Success! Direct URL: {final_url}")
-            return final_url
-        else:
-            print(f"[DEBUG] Telegram API returned 'ok: false'. Description: {data.get('description')}")
-    else:
-        print(f"[DEBUG] HTTP request failed with status {response.status_code}")
-    
-    return None
+
+# ============================================
+# TELEGRAM BOT MAIN CLASS
+# ============================================
 
 class TelegramGitHubBot:
     def __init__(self):
+        # Initialize Telegram client
         self.client = TelegramClient(
             StringSession(SESSION_STRING),
-            API_ID,
+            int(API_ID),
             API_HASH
         )
-        self.me = None
-        self.github_client = None
         
+        # Initialize GitHub client if credentials exist
+        self.github_client = None
         if GH_TOKEN and GH_REPO:
             self.github_client = GitHubActionsClient(GH_TOKEN, GH_REPO)
+            logger.info(f"✅ GitHub Actions configured for: {GH_REPO}")
+        else:
+            logger.warning("⚠️  GitHub Actions not configured")
+        
+        self.me = None
+        self.bot_username = None
+    
+    # ============================================
+    # EVENT HANDLERS
+    # ============================================
     
     async def setup_handlers(self):
-        """Setup all event handlers."""
+        """Setup all Telegram event handlers."""
         
         @self.client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
             """Handle /start command."""
             if not self.me:
                 self.me = await self.client.get_me()
+                self.bot_username = self.me.username
             
-            status = "✅ GitHub Actions Enabled" if self.github_client else "⚠️ GitHub Actions Not Configured"
+            github_status = "✅ Enabled" if self.github_client else "❌ Disabled"
             
             welcome = f"""
 🎬 **Video Speed Bot** (GitHub Actions)
 
-**Status:** {status}
-**How it works:**
-1. Send me a video
-2. Choose speed
-3. I trigger GitHub Actions
-4. GitHub processes video
-5. You get result in seconds!
+**Bot:** @{self.bot.username}
+**GitHub Actions:** {github_status}
+**Max File Size:** 2GB
 
-**Ready? Send me a video!**
+**How it works:**
+1. Send me any video file
+2. Choose playback speed
+3. I trigger GitHub Actions
+4. GitHub processes the video
+5. You receive the processed video here
+
+**Commands:**
+/start - Show this message
+/help - Detailed instructions
+/status - Check bot status
+/settings - Bot settings
+
+**Ready? Send me a video!** 🎥
             """
-            await event.reply(welcome)
+            await event.reply(welcome, parse_mode='Markdown')
         
         @self.client.on(events.NewMessage(pattern='/help'))
         async def help_handler(event):
             """Handle /help command."""
             help_text = """
-**Commands:**
-/start - Start bot
-/help - This message
-/status - Check bot status
+**📖 Detailed Help**
+
+**Supported Formats:**
+• MP4, MOV, AVI, MKV, WebM, FLV
+• Max size: 2GB (GitHub limit)
 
 **Speed Options:**
-• 0.5x - Half speed
-• 0.75x - Slow
+• 0.5x - Slow motion (half speed)
+• 0.75x - Slightly slow
 • 1.25x - Slightly fast
-• 1.5x - Fast (recommended)
+• 1.5x - Fast (most popular)
 • 2.0x - Double speed
 • 3.0x - Triple speed
 
-**Processing:**
-• Videos processed on GitHub Actions
-• Much faster than free servers
-• 2000 free minutes/month
+**Processing Details:**
+• Videos are processed on GitHub's servers
+• Processing time: 1-5 minutes depending on size
+• Original audio is preserved
+• Output format: MP4 with AAC audio
+
+**Troubleshooting:**
+• Large files (>500MB) may take longer
+• Ensure stable internet connection
+• If processing fails, try a smaller file
+
+**Need more help?**
+Contact the bot administrator.
             """
-            await event.reply(help_text)
+            await event.reply(help_text, parse_mode='Markdown')
         
         @self.client.on(events.NewMessage(pattern='/status'))
         async def status_handler(event):
             """Handle /status command."""
+            import psutil
+            
+            # Get system info
+            disk = psutil.disk_usage('/')
+            memory = psutil.virtual_memory()
+            
             status = f"""
-**Bot Status**
-✅ Online and active
+**🤖 Bot Status Report**
 
-**GitHub Actions:** {'✅ Enabled' if self.github_client else '❌ Disabled'}
-**Repository:** {GH_REPO or 'Not set'}
-**Active sessions:** {len(user_sessions)}
+**Basic Info:**
+• Bot: @{self.bot_username or 'Loading...'}
+• GitHub Actions: {'✅ Active' if self.github_client else '❌ Inactive'}
+• Active Sessions: {len(user_sessions)}
 
-**Ready to process videos!**
+**System Resources:**
+• CPU: {psutil.cpu_percent()}%
+• Memory: {memory.percent}% used
+• Disk: {disk.free/(1024**3):.1f}GB free of {disk.total/(1024**3):.1f}GB
+
+**Configuration:**
+• GitHub Repo: {GH_REPO or 'Not set'}
+• Max File Size: {MAX_FILE_SIZE/(1024**3):.1f}GB
+
+**Bot is {'✅ ONLINE' if self.me else '⏳ STARTING'}**
             """
-            await event.reply(status)
+            await event.reply(status, parse_mode='Markdown')
+        
+        @self.client.on(events.NewMessage(pattern='/debug'))
+        async def debug_handler(event):
+            """Debug command (admin only)."""
+            # You can add your user ID check here
+            # if event.sender_id != YOUR_USER_ID: return
+            
+            debug_info = f"""
+**🔧 Debug Information**
+
+**Environment Variables:**
+• API_ID: {'✅ Set' if API_ID else '❌ Missing'}
+• API_HASH: {'✅ Set' if API_HASH else '❌ Missing'}
+• SESSION_STRING: {'✅ Set' if SESSION_STRING else '❌ Missing'}
+• BOT_TOKEN: {'✅ Set' if BOT_TOKEN else '❌ Missing'}
+• GH_TOKEN: {'✅ Set' if GH_TOKEN else '❌ Missing'}
+• GH_REPO: {'✅ Set' if GH_REPO else '❌ Missing'}
+
+**Session Storage:**
+• Active users: {len(user_sessions)}
+• User IDs: {list(user_sessions.keys())}
+
+**Bot State:**
+• Logged in as: {self.me.username if self.me else 'Not logged in'}
+• GitHub Client: {'Ready' if self.github_client else 'Not ready'}
+            """
+            await event.reply(debug_info, parse_mode='Markdown')
         
         @self.client.on(events.NewMessage(
             func=lambda e: e.video or (
@@ -191,53 +343,75 @@ class TelegramGitHubBot:
             )
         ))
         async def video_handler(event):
-            """Handle incoming videos."""
+            """Handle incoming video files."""
             user_id = event.sender_id
             
             try:
-                # Get video info
+                # Get video information
                 if event.video:
                     media = event.video
-                    file_name = "video.mp4"
+                    file_type = "video"
                 else:
                     media = event.document
-                    file_name = media.file_name or "video.mp4"
+                    file_type = "document"
                 
-                # Check size (GitHub Actions has 2GB artifact limit)
-                if media.size > 2 * 1024 * 1024 * 1024:
-                    await event.reply("❌ **File too large!** Max 2GB for GitHub Actions")
+                file_name = getattr(media, 'file_name', 'video.mp4')
+                file_size = media.size
+                file_size_mb = file_size / (1024 * 1024)
+                
+                logger.info(f"📹 Received {file_type}: {file_name} ({file_size_mb:.1f}MB) from user {user_id}")
+                
+                # Check file size
+                if file_size > MAX_FILE_SIZE:
+                    await event.reply(
+                        f"❌ **File too large!**\n"
+                        f"Your file: {file_size_mb:.1f}MB\n"
+                        f"Maximum allowed: {MAX_FILE_SIZE/(1024*1024):.1f}MB\n\n"
+                        f"Please send a smaller video.",
+                        parse_mode='Markdown'
+                    )
                     return
                 
-                # Store session
+                # Store session information
                 user_sessions[user_id] = {
                     'media': media,
                     'file_id': media.id,
                     'file_name': file_name,
+                    'file_size_mb': file_size_mb,
                     'chat_id': event.chat_id,
                     'message_id': event.message.id,
-                    'timestamp': datetime.now()
+                    'timestamp': datetime.now(),
+                    'file_type': file_type
                 }
                 
-                # Send buttons
-                file_size_mb = media.size / (1024*1024)
+                # Send speed selection buttons
                 await event.reply(
-                    f"✅ **Video received!**\n"
-                    f"Size: {file_size_mb:.1f}MB\n"
-                    f"Choose speed (processed on GitHub):",
-                    buttons=SPEED_OPTIONS
+                    f"✅ **Video received successfully!**\n"
+                    f"📁 Name: `{file_name}`\n"
+                    f"📊 Size: {file_size_mb:.1f}MB\n"
+                    f"🔄 Type: {file_type}\n\n"
+                    f"**Choose playback speed:**",
+                    buttons=SPEED_OPTIONS,
+                    parse_mode='Markdown'
                 )
                 
             except Exception as e:
-                logger.error(f"Video handler error: {str(e)}")
-                await event.reply(f"❌ Error: {str(e)[:200]}")
+                logger.error(f"Error in video_handler: {str(e)}")
+                await event.reply(
+                    f"❌ **Error processing video:**\n`{str(e)[:200]}`",
+                    parse_mode='Markdown'
+                )
         
         @self.client.on(events.CallbackQuery())
         async def callback_handler(event):
-            """Handle button callbacks."""
+            """Handle inline button callbacks."""
             user_id = event.sender_id
             data = event.data.decode() if event.data else ""
             
             try:
+                # Get the message that contains the buttons
+                callback_message = await event.get_message()
+                
                 if data == "cancel":
                     await event.edit("❌ **Operation cancelled.**")
                     if user_id in user_sessions:
@@ -247,27 +421,64 @@ class TelegramGitHubBot:
                 elif data.startswith("speed_"):
                     speed = float(data.split("_")[1])
                     
+                    # Check if user has a video session
                     if user_id not in user_sessions:
-                        await event.edit("❌ No video found! Please send again.")
+                        await event.edit("❌ **No video found!**\nPlease send a video first.")
                         return
                     
+                    # Check GitHub configuration
                     if not self.github_client:
-                        await event.edit("❌ GitHub Actions not configured!")
+                        await event.edit(
+                            "❌ **GitHub Actions not configured!**\n"
+                            "The administrator needs to set GH_TOKEN and GH_REPO environment variables."
+                        )
                         return
                     
                     session = user_sessions[user_id]
                     
                     # Update status
-                    await event.edit(f"🚀 **Triggering GitHub Actions...**\nSpeed: {speed}x")
+                    await event.edit(f"⏳ **Getting video URL...**\nSpeed: {speed}x")
                     
-                    # Get direct download URL
-                    video_url = self.github_client.get_direct_video_url(session['file_id'])
+                    # Step 1: Get direct download URL from Telegram
+                    video_url = await self.github_client.get_direct_video_url(session['file_id'])
                     
                     if not video_url:
-                        await event.edit("❌ Failed to get video URL")
+                        await event.edit(
+                            "❌ **Failed to get video URL!**\n"
+                            "This usually means:\n"
+                            "1. File is too large (>20MB for bot API)\n"
+                            "2. File ID is invalid or expired\n"
+                            "3. Bot token is incorrect\n\n"
+                            "Try sending the video again."
+                        )
+                        if user_id in user_sessions:
+                            del user_sessions[user_id]
                         return
                     
-                    # Trigger GitHub Actions
+                    # Handle special error cases
+                    if video_url == "FILE_TOO_BIG":
+                        await event.edit(
+                            "❌ **File too large for bot API!**\n"
+                            "Telegram bot API has a 20MB limit for file downloads.\n"
+                            "Please send a video smaller than 20MB."
+                        )
+                        if user_id in user_sessions:
+                            del user_sessions[user_id]
+                        return
+                    
+                    if video_url in ["INVALID_FILE_ID", "WRONG_FILE_ID"]:
+                        await event.edit(
+                            "❌ **File ID error!**\n"
+                            "The file ID is invalid or has expired.\n"
+                            "Please send the video again."
+                        )
+                        if user_id in user_sessions:
+                            del user_sessions[user_id]
+                        return
+                    
+                    # Step 2: Trigger GitHub Actions
+                    await event.edit(f"🚀 **Triggering GitHub Actions...**\nSpeed: {speed}x")
+                    
                     success = await self.github_client.trigger_video_workflow(
                         video_url=video_url,
                         speed=speed,
@@ -277,102 +488,19 @@ class TelegramGitHubBot:
                     
                     if success:
                         await event.edit(
-                            f"✅ **GitHub Actions triggered!**\n"
-                            f"Speed: {speed}x\n"
-                            f"Processing will start shortly...\n"
-                            f"You'll get the video here when done!"
+                            f"✅ **GitHub Actions triggered successfully!**\n\n"
+                            f"**Details:**\n"
+                            f"• Speed: {speed}x\n"
+                            f"• Size: {session['file_size_mb']:.1f}MB\n"
+                            f"• File: `{session['file_name']}`\n\n"
+                            f"⏳ **Processing has started on GitHub...**\n"
+                            f"You'll receive the processed video here once it's done.\n"
+                            f"Estimated time: 1-5 minutes depending on file size."
                         )
+                        
+                        # Log successful trigger
+                        logger.info(f"✅ Workflow triggered for user {user_id}: {session['file_name']} at {speed}x")
                     else:
-                        await event.edit("❌ Failed to trigger GitHub Actions")
-                    
-                    # Cleanup session
-                    if user_id in user_sessions:
-                        del user_sessions[user_id]
-                
-            except Exception as e:
-                logger.error(f"Callback error: {str(e)}")
-                try:
-                    await event.edit(f"❌ Error: {str(e)[:200]}")
-                except:
-                    pass
-                if user_id in user_sessions:
-                    del user_sessions[user_id]
-    
-    async def start(self):
-        """Start the bot."""
-        print("\n" + "="*50)
-        print("🎬 TELEGRAM + GITHUB ACTIONS BOT")
-        print("="*50)
-        
-        # Connect with session string
-        await self.client.start()
-        self.me = await self.client.get_me()
-        
-        # Setup handlers
-        await self.setup_handlers()
-        
-        print(f"✅ Logged in as: @{self.me.username}")
-        if self.github_client:
-            print(f"✅ GitHub Actions enabled for: {GH_REPO}")
-        else:
-            print("⚠️  GitHub Actions not configured")
-        print("✅ Bot is ready!")
-        print("💬 Send videos to trigger GitHub Actions")
-        print("="*50)
-        
-        # Keep running
-        await self.client.run_until_disconnected()
-    
-    async def stop(self):
-        """Stop the bot."""
-        await self.client.disconnect()
-
-async def handle_health(request):
-    """Health check endpoint."""
-    return web.Response(text="✅ Bot is running!")
-
-async def start_bot(app):
-    """Start the Telegram bot in background."""
-    bot = TelegramGitHubBot()
-    app['bot'] = bot
-    asyncio.create_task(bot.start())
-
-async def cleanup_bot(app):
-    """Cleanup bot on shutdown."""
-    if 'bot' in app:
-        await app['bot'].stop()
-
-async def main():
-    """Main function."""
-    # Create web application
-    app = web.Application()
-    
-    # Add routes
-    app.router.add_get('/', handle_health)
-    app.router.add_get('/health', handle_health)
-    
-    # Add startup and cleanup
-    app.on_startup.append(start_bot)
-    app.on_cleanup.append(cleanup_bot)
-    
-    # Start web server
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    
-    print(f"🌐 Web server on port {PORT}")
-    await site.start()
-    
-    print("✅ Bot is running!")
-    print("🛑 Press Ctrl+C to stop")
-    
-    # Keep running
-    try:
-        await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        print("\n👋 Shutting down...")
-    finally:
-        await runner.cleanup()
-
-if __name__ == '__main__':
-    asyncio.run(main())
+                        await event.edit(
+                            "❌ **Failed to trigger GitHub Actions!**\n"
+                            "This could be due 
