@@ -4,27 +4,16 @@ import requests
 import subprocess
 import json
 
-# Configuration
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+# Configuration from environment variables
+TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN')
 VIDEO_URL = os.environ.get('VIDEO_URL')
 SPEED = float(os.environ.get('SPEED', '1.5'))
 CHAT_ID = os.environ.get('CHAT_ID')
 MESSAGE_ID = os.environ.get('MESSAGE_ID')
 
-def download_file(url, filename):
-    """Download file from URL."""
-    print(f"Downloading from {url}")
-    response = requests.get(url, stream=True)
-    with open(filename, 'wb') as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
-    print(f"Downloaded to {filename}")
-    return True
-
 def send_telegram_message(text):
     """Send message to Telegram."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     data = {
         'chat_id': CHAT_ID,
         'text': text,
@@ -39,14 +28,15 @@ def send_telegram_message(text):
 
 def send_telegram_video(video_path, caption):
     """Send video to Telegram."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendVideo"
     
     with open(video_path, 'rb') as video_file:
         files = {'video': video_file}
         data = {
             'chat_id': CHAT_ID,
             'caption': caption,
-            'supports_streaming': True
+            'supports_streaming': True,
+            'parse_mode': 'Markdown'
         }
         try:
             response = requests.post(url, files=files, data=data)
@@ -54,6 +44,26 @@ def send_telegram_video(video_path, caption):
         except Exception as e:
             print(f"Error sending video: {e}")
             return None
+
+def download_file(url, filename):
+    """Download file from URL with progress."""
+    print(f"Downloading from {url}")
+    response = requests.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    
+    with open(filename, 'wb') as f:
+        downloaded = 0
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    percent = (downloaded / total_size) * 100
+                    if int(percent) % 10 == 0:  # Log every 10%
+                        print(f"Downloaded: {percent:.1f}%")
+    
+    print(f"Downloaded to {filename}")
+    return True
 
 def process_video():
     """Main processing function."""
@@ -107,7 +117,8 @@ def process_video():
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
-            send_telegram_message(f"❌ Processing failed:\n```{result.stderr[:200]}```")
+            error_msg = result.stderr[:200] if result.stderr else "Unknown error"
+            send_telegram_message(f"❌ Processing failed:\n```{error_msg}```")
             return False
         
         # Get file size
@@ -118,7 +129,7 @@ def process_video():
         # Send video
         send_telegram_message(f"✅ *Processing complete!*\n📤 Uploading {file_size_mb:.1f}MB...")
         
-        response = send_telegram_video(output_file, f"✅ Speed: {SPEED}x")
+        response = send_telegram_video(output_file, f"✅ **Speed: {SPEED}x**")
         
         if response and response.get('ok'):
             send_telegram_message(f"🎉 *Done!* Speed: {SPEED}x")
