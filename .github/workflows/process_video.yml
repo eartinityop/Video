@@ -33,18 +33,21 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y ffmpeg
     
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install Python dependencies
+      run: |
+        pip install requests
+    
     - name: Process Video
       env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         VIDEO_URL: ${{ github.event.client_payload.video_url || github.event.inputs.video_url }}
         SPEED: ${{ github.event.client_payload.speed || github.event.inputs.speed }}
         CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
         MESSAGE_ID: ${{ github.event.client_payload.message_id || github.event.inputs.message_id }}
       run: |
         python process_video.py
-        
-    - name: Upload processed video as artifact (optional)
-      uses: actions/upload-artifact@v3
-      with:
-        name: processed-video
-        path: output.mp4
