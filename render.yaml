@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: telegram-video-bot
+    env: python
+    buildCommand: |
+      apt update
+      apt install ffmpeg -y
+      pip install -r requirements.txt
+    startCommand: python web_bot.py
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: SESSION_STRING
+        sync: false
+    disk:
+      name: temp
+      mountPath: /tmp
+      sizeGB: 20
+    plan: free
