@@ -503,4 +503,294 @@ Contact the bot administrator.
                     else:
                         await event.edit(
                             "❌ **Failed to trigger GitHub Actions!**\n"
-                            "This could be due 
+                            "This could be due to:\n"
+                            "1. Invalid GitHub token\n"
+                            "2. Incorrect repository name\n"
+                            "3. GitHub API rate limit\n"
+                            "4. Network issues\n\n"
+                            "Please try again later or contact the administrator."
+                        )
+                    
+                    # Cleanup session
+                    if user_id in user_sessions:
+                        del user_sessions[user_id]
+                
+            except Exception as e:
+                logger.error(f"Error in callback_handler: {str(e)}")
+                try:
+                    await event.edit(f"❌ **Unexpected error:**\n`{str(e)[:200]}`")
+                except:
+                    pass
+                
+                # Cleanup on error
+                if user_id in user_sessions:
+                    del user_sessions[user_id]
+    
+    # ============================================
+    # BOT LIFECYCLE
+    # ============================================
+    
+    async def start(self):
+        """Start the Telegram bot."""
+        print("\n" + "="*60)
+        print("🎬 TELEGRAM VIDEO BOT WITH GITHUB ACTIONS")
+        print("="*60)
+        
+        try:
+            # Connect to Telegram
+            await self.client.start()
+            self.me = await self.client.get_me()
+            self.bot_username = self.me.username
+            
+            # Setup event handlers
+            await self.setup_handlers()
+            
+            print(f"✅ Logged in as: @{self.bot_username} (ID: {self.me.id})")
+            print(f"✅ GitHub Actions: {'ENABLED' if self.github_client else 'DISABLED'}")
+            if self.github_client:
+                print(f"✅ Repository: {GH_REPO}")
+            print(f"✅ Bot is ready and listening for messages...")
+            print("="*60)
+            print("💡 Send /start to your bot to begin")
+            print("💡 Send /status to check bot health")
+            print("💡 Send /debug for technical details")
+            print("="*60)
+            
+            # Keep the bot running
+            await self.client.run_until_disconnected()
+            
+        except Exception as e:
+            logger.error(f"Failed to start bot: {str(e)}")
+            raise
+    
+    async def stop(self):
+        """Stop the bot gracefully."""
+        await self.client.disconnect()
+        logger.info("Bot stopped gracefully")
+
+# ============================================
+# WEB SERVER FOR RENDER
+# ============================================
+
+async def handle_health(request):
+    """Health check endpoint for Render."""
+    return web.Response(text="✅ Telegram Video Bot is running!")
+
+async def handle_root(request):
+    """Root endpoint with basic information."""
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Telegram Video Speed Bot</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+            }
+            .container {
+                background: white;
+                border-radius: 20px;
+                padding: 40px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                margin-top: 40px;
+            }
+            h1 {
+                color: #2d3748;
+                text-align: center;
+                font-size: 2.5em;
+                margin-bottom: 10px;
+            }
+            .status {
+                background: #48bb78;
+                color: white;
+                padding: 10px 20px;
+                border-radius: 50px;
+                display: inline-block;
+                font-weight: bold;
+                margin: 20px 0;
+            }
+            .feature-list {
+                background: #f7fafc;
+                padding: 20px;
+                border-radius: 10px;
+                margin: 20px 0;
+            }
+            .feature-item {
+                display: flex;
+                align-items: center;
+                margin: 10px 0;
+            }
+            .feature-icon {
+                font-size: 1.5em;
+                margin-right: 10px;
+            }
+            .instructions {
+                background: #e6fffa;
+                padding: 20px;
+                border-radius: 10px;
+                margin: 20px 0;
+            }
+            .step {
+                margin: 15px 0;
+                padding-left: 20px;
+                position: relative;
+            }
+            .step:before {
+                content: "→";
+                position: absolute;
+                left: 0;
+                color: #4299e1;
+                font-weight: bold;
+            }
+            .footer {
+                text-align: center;
+                margin-top: 40px;
+                color: #718096;
+                font-size: 0.9em;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎬 Telegram Video Speed Bot</h1>
+            
+            <div style="text-align: center;">
+                <div class="status">✅ Bot is Online and Running</div>
+            </div>
+            
+            <div class="feature-list">
+                <h3>🌟 Features:</h3>
+                <div class="feature-item">
+                    <span class="feature-icon">⚡</span>
+                    <span>Process videos with FFmpeg on GitHub Actions</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🔧</span>
+                    <span>Change playback speed (0.5x to 3.0x)</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📊</span>
+                    <span>Supports videos up to 2GB</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🔒</span>
+                    <span>Automatic cleanup of temporary files</span>
+                </div>
+            </div>
+            
+            <div class="instructions">
+                <h3>📱 How to Use:</h3>
+                <div class="step">Find the bot on Telegram by searching for your account</div>
+                <div class="step">Send /start to begin</div>
+                <div class="step">Send any video file to the bot</div>
+                <div class="step">Choose your desired playback speed</div>
+                <div class="step">Wait for GitHub to process your video</div>
+                <div class="step">Receive the processed video in Telegram!</div>
+            </div>
+            
+            <div style="text-align: center; margin: 30px 0;">
+                <a href="/health" style="
+                    background: #4299e1;
+                    color: white;
+                    padding: 12px 30px;
+                    text-decoration: none;
+                    border-radius: 50px;
+                    font-weight: bold;
+                    display: inline-block;
+                ">Health Check</a>
+            </div>
+            
+            <div class="footer">
+                <p>Powered by Telegram + GitHub Actions + Render</p>
+                <p>This service processes videos in the cloud using GitHub's infrastructure</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return web.Response(text=html_content, content_type='text/html')
+
+async def start_bot(app):
+    """Start the Telegram bot in background."""
+    bot = TelegramGitHubBot()
+    app['bot'] = bot
+    # Start bot in background task
+    asyncio.create_task(bot.start())
+
+async def cleanup_bot(app):
+    """Cleanup bot on shutdown."""
+    if 'bot' in app:
+        await app['bot'].stop()
+
+async def main():
+    """Main function to start web server and bot."""
+    print("🚀 Starting Telegram Video Bot...")
+    print(f"🌐 Web server will run on port {PORT}")
+    
+    # Create web application
+    app = web.Application()
+    
+    # Add routes
+    app.router.add_get('/', handle_root)
+    app.router.add_get('/health', handle_health)
+    
+    # Add startup and cleanup callbacks
+    app.on_startup.append(start_bot)
+    app.on_cleanup.append(cleanup_bot)
+    
+    # Start web server
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    
+    await site.start()
+    print(f"✅ Web server started on http://0.0.0.0:{PORT}")
+    print("🤖 Telegram bot is starting in the background...")
+    print("🛑 Press Ctrl+C to stop the server")
+    
+    # Keep running until interrupted
+    try:
+        await asyncio.Event().wait()
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down gracefully...")
+    finally:
+        await runner.cleanup()
+
+# ============================================
+# ENTRY POINT
+# ============================================
+
+if __name__ == '__main__':
+    # Check for critical issues before starting
+    print("🔍 Pre-flight check...")
+    
+    if not BOT_TOKEN:
+        print("❌ CRITICAL: BOT_TOKEN environment variable is not set!")
+        print("Please set it in Render dashboard → Environment")
+        print("Get your bot token from @BotFather on Telegram")
+        sys.exit(1)
+    
+    if not GH_TOKEN or not GH_REPO:
+        print("⚠️  WARNING: GitHub Actions configuration is incomplete")
+        print("The bot will work but cannot trigger video processing")
+        print("Set GH_TOKEN and GH_REPO to enable GitHub Actions")
+    
+    print("✅ All checks passed. Starting application...")
+    
+    # Run the application
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Application stopped by user")
+    except Exception as e:
+        print(f"\n💥 Application crashed: {str(e)}")
+        sys.exit(1)
