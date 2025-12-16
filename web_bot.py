@@ -83,18 +83,28 @@ class GitHubActionsClient:
             return False
     
     def get_direct_video_url(self, file_id):
-        """Get direct download URL for Telegram file."""
-        # First get file path
-        file_info_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-        response = requests.get(file_info_url)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('ok'):
-                file_path = data['result']['file_path']
-                return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-        
-        return None
+    """Get direct download URL for Telegram file."""
+    # First get file path
+    file_info_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+    print(f"[DEBUG] Calling Telegram API: {file_info_url}")  # Logs the URL being called
+    
+    response = requests.get(file_info_url)
+    print(f"[DEBUG] API Response Status: {response.status_code}")  # Logs the HTTP status
+    print(f"[DEBUG] API Response Body: {response.text}")           # Logs the full response
+    
+    if response.status_code == 200:
+        data = response.json()
+        if data.get('ok'):
+            file_path = data['result']['file_path']
+            final_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+            print(f"[DEBUG] Success! Direct URL: {final_url}")
+            return final_url
+        else:
+            print(f"[DEBUG] Telegram API returned 'ok: false'. Description: {data.get('description')}")
+    else:
+        print(f"[DEBUG] HTTP request failed with status {response.status_code}")
+    
+    return None
 
 class TelegramGitHubBot:
     def __init__(self):
