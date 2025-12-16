@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.getenv('API_ID', '123456'))
 API_HASH = os.getenv('API_HASH', 'your_api_hash_here')
 SESSION_STRING = os.getenv('SESSION_STRING', '')
-GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', '')  # GitHub Personal Access Token
-GITHUB_REPO = os.getenv('GITHUB_REPO', '')    # username/repo
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')        # Your bot token for file URLs
+GH_TOKEN = os.getenv('GH_TOKEN', '')           # GitHub Personal Access Token
+GH_REPO = os.getenv('GH_REPO', '')             # username/repo
+BOT_TOKEN = os.getenv('BOT_TOKEN', '')         # Your bot token for file URLs
 PORT = int(os.getenv('PORT', 10000))
 
 # Speed options
@@ -106,8 +106,8 @@ class TelegramGitHubBot:
         self.me = None
         self.github_client = None
         
-        if GITHUB_TOKEN and GITHUB_REPO:
-            self.github_client = GitHubActionsClient(GITHUB_TOKEN, GITHUB_REPO)
+        if GH_TOKEN and GH_REPO:
+            self.github_client = GitHubActionsClient(GH_TOKEN, GH_REPO)
     
     async def setup_handlers(self):
         """Setup all event handlers."""
@@ -167,7 +167,7 @@ class TelegramGitHubBot:
 ✅ Online and active
 
 **GitHub Actions:** {'✅ Enabled' if self.github_client else '❌ Disabled'}
-**Repository:** {GITHUB_REPO or 'Not set'}
+**Repository:** {GH_REPO or 'Not set'}
 **Active sessions:** {len(user_sessions)}
 
 **Ready to process videos!**
@@ -303,7 +303,7 @@ class TelegramGitHubBot:
         
         print(f"✅ Logged in as: @{self.me.username}")
         if self.github_client:
-            print(f"✅ GitHub Actions enabled for: {GITHUB_REPO}")
+            print(f"✅ GitHub Actions enabled for: {GH_REPO}")
         else:
             print("⚠️  GitHub Actions not configured")
         print("✅ Bot is ready!")
@@ -320,15 +320,6 @@ class TelegramGitHubBot:
 async def handle_health(request):
     """Health check endpoint."""
     return web.Response(text="✅ Bot is running!")
-
-async def handle_webhook(request):
-    """Handle webhook from GitHub Actions (optional)."""
-    try:
-        data = await request.json()
-        logger.info(f"Webhook received: {data}")
-        return web.Response(text="OK")
-    except:
-        return web.Response(text="Invalid request")
 
 async def start_bot(app):
     """Start the Telegram bot in background."""
@@ -349,7 +340,6 @@ async def main():
     # Add routes
     app.router.add_get('/', handle_health)
     app.router.add_get('/health', handle_health)
-    app.router.add_post('/webhook', handle_webhook)
     
     # Add startup and cleanup
     app.on_startup.append(start_bot)
