@@ -1,0 +1,50 @@
+name: Process Video with FFmpeg
+
+on:
+  repository_dispatch:
+    types: [process_video]
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'Video URL from Telegram'
+        required: true
+      speed:
+        description: 'Speed factor (0.5, 1.5, 2.0, etc.)'
+        required: true
+        default: '1.5'
+      chat_id:
+        description: 'Telegram Chat ID'
+        required: true
+      message_id:
+        description: 'Telegram Message ID'
+        required: true
+
+jobs:
+  process-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Install FFmpeg
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+    
+    - name: Process Video
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        VIDEO_URL: ${{ github.event.client_payload.video_url || github.event.inputs.video_url }}
+        SPEED: ${{ github.event.client_payload.speed || github.event.inputs.speed }}
+        CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
+        MESSAGE_ID: ${{ github.event.client_payload.message_id || github.event.inputs.message_id }}
+      run: |
+        python process_video.py
+        
+    - name: Upload processed video as artifact (optional)
+      uses: actions/upload-artifact@v3
+      with:
+        name: processed-video
+        path: output.mp4
